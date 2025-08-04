@@ -1,0 +1,255 @@
+const sql = require("mssql");
+
+// DB CONFIG
+const config = { 
+    server: 'az01ismsproddbds01.database.windows.net', 
+    user: 'sqladminuser', 
+    password: 'pZxxzYRJ#32[', 
+    database: 'az01ismsproddbd01',
+    port: 1433, 
+    options: {
+        encrypt: true, // Use this if you're on Azure
+        trustServerCertificate: false // Change as needed based on your SSL setup
+    }
+};
+
+// Hardcoded Date Range (for example, from July 1, 2024 to August 19, 2024)
+// const startDate = '2024-12-16';  // Start Date
+// const endDate = '2025-01-31';    // End Date
+
+// Get the current date
+const currentDate = new Date();
+
+// Set startDate to the first day of the current month
+const startDate = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1)
+  .toISOString()
+  .slice(0, 10); // Format as 'YYYY-MM-DD'
+ 
+// Set endDate to the current date
+const endDate = currentDate.toISOString().slice(0, 10); // Format as 'YYYY-MM-DD'
+
+console.log(`Start Date: ${startDate}`);
+console.log(`End Date: ${endDate}`);
+
+// SQL Query for fetching Incident Data, now filtered by startDate and endDate
+const qIncident = `
+SELECT
+    S.VID,
+    S.BUID,
+    S.SIID,
+    S.SINAME,  
+    S.SICODE,
+    V.VNAME,  
+    V.VCODE,  
+    B.BUNAME,  
+    B.BUCODE,  
+    -- Use the average of AVAILABLE for each site per month
+    AVG(ISNULL(D.AVAILABLE, 0)) AS AVAILABLE_MONTHLY,
+	-- Use the average of AVAILABLE for each site per month
+    AVG(ISNULL(D.REQUIRED, 0)) AS REQUIRED_MONTHLY,
+	-- Use the average of AVAILABLE for each site per month
+    AVG(ISNULL(D.GAP, 0)) AS GAP_MONTHLY,
+    -- Extract month, quarter, and year directly from DSRDATE
+    MONTH(D.DSRDATE) AS MONTH,
+    YEAR(D.DSRDATE) AS YEAR,
+UPPER(LEFT(DATENAME(MONTH, D.DSRDATE), 3)) AS MONTHNAME,
+     -- Calculate quarter
+    (CASE 
+        WHEN MONTH(D.DSRDATE) BETWEEN 1 AND 3 THEN 4
+        WHEN MONTH(D.DSRDATE) BETWEEN 4 AND 6 THEN 1
+        WHEN MONTH(D.DSRDATE) BETWEEN 7 AND 9 THEN 2
+        WHEN MONTH(D.DSRDATE) BETWEEN 10 AND 12 THEN 3
+     END) AS QUARTER
+FROM
+    DSRSECSTAFFONROLL D
+LEFT JOIN SITE S ON S.SIID = D.SIID
+LEFT JOIN VERTICAL V ON V.VID = S.VID
+LEFT JOIN BUSINESS B ON B.BUID = S.BUID
+WHERE
+    D.DSRDATE BETWEEN @startDate AND @endDate
+    AND S.SISTATUS = 'ACTIVE'
+    AND D.DSRPARAMSNAME NOT IN ('ILBHS SCREENER')
+    AND ISNULL(D.AVAILABLE, 0) != 0
+GROUP BY
+    S.VID,
+    S.BUID,
+    S.SIID,
+    S.SINAME,
+    S.SICODE,
+    V.VNAME,
+    V.VCODE,
+    B.BUNAME,
+    B.BUCODE,
+    MONTH(D.DSRDATE),
+    YEAR(D.DSRDATE),
+    DATENAME(MONTH, D.DSRDATE)
+ORDER BY
+    S.SIID;
+
+;  -- Order by DSRDATE and SIID`;
+
+async function insertOrUpdateDashboard(incidentData) {
+    let insertCount = 0;  // Counter for INSERT queries
+    let updateCount = 0;  // Counter for UPDATE queries
+ 
+    try {
+        const pool = await sql.connect(config);
+ 
+    
+ 
+        // Loop through each incident record and merge data from all sources
+        for (const incidentRow of incidentData) {
+            const siid = incidentRow.SIID;
+            const vid = incidentRow.VID;
+            const buid = incidentRow.BUID;
+            const month = incidentRow.MONTH;  // Use the calculated month from the query
+            const year = incidentRow.YEAR;    // Use the calculated year from the query
+            const monthName = incidentRow.MONTHNAME;  // Use the calculated month name
+            const quarter = incidentRow.QUARTER; // Use the calculated quarter from the query
+            const available = incidentRow.AVAILABLE_MONTHLY;  // Availability data
+            const required = incidentRow.REQUIRED_MONTHLY;  // Availability data
+            const gap = incidentRow.GAP_MONTHLY;  // Availability data
+ 
+            // Fetch the current max ROWID for each iteration and increment it by 1
+            const maxRowIdQuery = `SELECT MAX(ROWID) AS MaxRowID FROM [dbo].[OL_DASHBOARD_MONTHLY_SEC_ONROLL]`;
+            const maxRowIdResult = await pool.request().query(maxRowIdQuery);
+            const maxRowId = maxRowIdResult.recordset[0].MaxRowID || 0;  // If no rows, set ROWID to 0
+            const newRowId = maxRowId + 1; // Increment ROWID by 1 for each iteration
+ 
+            // Check if the record exists in OL_DASHBOARD_MONTHLY_SEC_ONROLL
+            const checkQuery = `SELECT COUNT(*) AS RecordCount
+                                FROM [dbo].[OL_DASHBOARD_MONTHLY_SEC_ONROLL]
+                                WHERE [SIID] = @SIID AND [VID] = @VID AND [BUID] = @BUID 
+                                AND [MONTH] = @MONTH AND [QUARTER] = @QUARTER AND [YEAR] = @YEAR`;
+ 
+            const checkResult = await pool.request()
+                .input('SIID', sql.Int, siid)
+                .input('VID', sql.Int, vid)
+                .input('BUID', sql.Int, buid)
+                .input('MONTH', sql.Int, month)
+                .input('QUARTER', sql.Int, quarter)
+                .input('YEAR', sql.Int, year)
+                .query(checkQuery);
+ 
+            const recordExists = checkResult.recordset[0].RecordCount > 0;
+ 
+            if (recordExists) {
+                // Update existing record
+                const updateQuery = `
+                    UPDATE [dbo].[OL_DASHBOARD_MONTHLY_SEC_ONROLL]
+                    SET
+                        [AVAILABLE] = @AVAILABLE,
+                        [REQUIRED] = @REQUIRED,
+                        [GAP] = @GAP,
+                        [MONTHNAME] = @MONTHNAME
+                    WHERE
+                        [SIID] = @SIID AND [VID] = @VID AND [BUID] = @BUID 
+                        AND [MONTH] = @MONTH AND [QUARTER] = @QUARTER AND [YEAR] = @YEAR
+                `;
+                await pool.request()
+                    .input('SIID', sql.Int, siid)
+                    .input('VID', sql.Int, vid)
+                    .input('BUID', sql.Int, buid)
+                    .input('MONTH', sql.Int, month)
+                    .input('QUARTER', sql.Int, quarter)
+                    .input('YEAR', sql.Int, year)
+                    .input('AVAILABLE', sql.Int, available)
+                    .input('REQUIRED', sql.Int, required)
+                    .input('GAP', sql.Int, gap)
+                    .input('MONTHNAME', sql.NVarChar, monthName)
+                    .query(updateQuery);
+ 
+                updateCount++;  // Increment update counter
+            } else {
+                // Insert new record
+                const insertQuery = `
+                    INSERT INTO [dbo].[OL_DASHBOARD_MONTHLY_SEC_ONROLL]
+                    ([ROWID], [VID], [BUID], [SIID], [VNAME], [BUNAME], [SINAME], [VCODE], [BUCODE], [SICODE], [MONTH],
+                     [AVAILABLE],[REQUIRED],[GAP], [QUARTER], [MONTHNAME], [YEAR])
+                    VALUES
+                    (@ROWID, @VID , @BUID , @SIID , @VNAME, @BUNAME, @SINAME, @VCODE, @BUCODE, @SICODE, @MONTH,
+                     @AVAILABLE, @REQUIRED, @GAP, @QUARTER, @MONTHNAME , @YEAR);
+                `;
+                await pool.request()
+                    .input('ROWID', sql.Int, newRowId)
+                    .input('SIID', sql.Int, siid)
+                    .input('VID', sql.Int, vid)
+                    .input('BUID', sql.Int, buid)
+                    .input('VNAME', sql.NVarChar, incidentRow.VNAME)
+                    .input('BUNAME', sql.NVarChar, incidentRow.BUNAME)
+                    .input('SINAME', sql.NVarChar, incidentRow.SINAME)
+                    .input('VCODE', sql.NVarChar, incidentRow.VCODE)
+                    .input('BUCODE', sql.NVarChar, incidentRow.BUCODE)
+                    .input('SICODE', sql.NVarChar, incidentRow.SICODE)
+                    .input('MONTH', sql.Int, month)
+                    .input('AVAILABLE', sql.Int, available)
+                    .input('REQUIRED', sql.Int, required)
+                    .input('GAP', sql.Int, gap)
+                    .input('QUARTER', sql.Int, quarter)
+                    .input('MONTHNAME', sql.NVarChar, monthName)
+                    .input('YEAR', sql.Int, year)
+                    .query(insertQuery);
+ 
+                insertCount++;  // Increment insert counter
+            }
+        }
+ 
+        console.log(`Total INSERT queries executed: ${insertCount}`);
+        console.log(`Total UPDATE queries executed: ${updateCount}`);
+    } catch (err) {
+        console.error('Error in insertOrUpdateDashboard:', err.message);
+    }
+}
+
+
+
+async function fetchAndInsertIncidentData() {
+    try {
+        const pool = await sql.connect(config);
+ 
+        // Fetch Incident Data for the given date range
+        const incidentResult = await pool.request()
+            .input('startDate', sql.Date, startDate)
+            .input('endDate', sql.Date, endDate)
+            .query(qIncident);
+ 
+        // Check if the query returns the necessary data
+        console.log("Fetched Incident Data:", incidentResult.recordset);
+ 
+        // Group the data by Year and Month
+        const groupedData = incidentResult.recordset.reduce((acc, row) => {
+            const year = row.YEAR;
+            const month = row.MONTH;
+            const key = `${year}-${month}`;  // Unique key for each month-year
+ 
+            if (!acc[key]) {
+                acc[key] = [];
+            }
+ 
+            acc[key].push(row);
+            return acc;
+        }, {});
+ 
+        // Process each grouped month-year data and calculate the average
+        for (const groupKey in groupedData) {
+            const data = groupedData[groupKey];
+            const [year, month] = groupKey.split('-');
+ 
+            // Calculate the monthly average for 'AVAILABLE'
+            const monthlyAverage = data.reduce((sum, row) => sum + row.MONTHLY_AVERAGE, 0) / data.length;
+ 
+            console.log(`Processing Data for Year: ${year}, Month: ${month}`);
+            console.log(`Monthly Average: ${monthlyAverage}`);
+ 
+            // Now, pass the data to the insertOrUpdateDashboard function
+            await insertOrUpdateDashboard(data, month, year, monthlyAverage);
+        }
+ 
+        pool.close();
+    } catch (err) {
+        console.error("Error in fetching or inserting data:", err);
+    }
+}
+
+// Execute the process
+fetchAndInsertIncidentData();

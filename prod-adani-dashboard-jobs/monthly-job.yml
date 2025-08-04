@@ -1,0 +1,57 @@
+trigger:
+- main
+
+schedules:
+- cron: "30 6 * * *"  # This runs the job every day at 12:00 PM IST
+  displayName: Monthly job run
+  branches:
+    include:
+    - main
+  always: true
+
+pool:
+  name: ISMS-New-Pool
+  demands:
+   - agent.name -equals AZ01ISMSAPD01
+
+variables:
+  DB_USER: 'sqladminuser'
+  DB_PASSWORD: 'pZxxzYRJ#32['
+  DB_SERVER: 'az01ismsproddbds01.database.windows.net'
+  DB_DATABASE: 'az01ismsproddbd01'
+
+
+steps:
+- task: NodeTool@0
+  inputs:
+    versionSpec: '18.x'  # Node.js version
+  displayName: 'Install Node.js'
+
+- script: |
+    npm install  
+    npm test
+  displayName: 'Install Dependencies and Run Tests'
+
+- script: |
+    node .\OL_DASHBOARD_MONTHLY_AGENCY_PARAMS.js
+  displayName: 'Run OL_DASHBOARD_MONTHLY_AGENCY_PARAMS Job'
+
+- script: |
+    node .\OL_DASHBOARD_MONTHLY_AGENCY.js
+  displayName: 'Run OL_DASHBOARD_MONTHLY_AGENCY Job'
+
+- script: |
+    node .\OL_DASHBOARD_MONTHLY_OFFROLL.js
+  displayName: 'Run OL_DASHBOARD_MONTHLY_OFFROLL Job'
+
+- script: |
+    node .\OL_DASHBOARD_MONTHLY_SEC_ONROLL.js
+  displayName: 'Run OL_DASHBOARD_MONTHLY_SEC_ONROLL Job'
+
+- script: |
+    node .\OL_DASHBOARD_MONTHLY_SECAUTO_PARAMS.js
+  displayName: 'Run OL_DASHBOARD_MONTHLY_SECAUTO_PARAMS Job'
+
+- script: |
+    node .\OL_DASHBOARD_MONTHLY_SECAUTO.js
+  displayName: 'Run OL_DASHBOARD_MONTHLY_SECAUTO Job'
